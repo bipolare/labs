@@ -4,16 +4,17 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Linq; // Додано для використання Linq у UdpTimedSender
+using System.Linq; 
 
-// --- ТОЧКА ВХОДУ ДЛЯ КОНСОЛЬНОГО ЗАСТОСУНКУ (ВИПРАВЛЕННЯ CS5001) ---
+// --- ТОЧКА ВХОДУ ДЛЯ КОНСОЛЬНОГО ЗАСТОСУНКУ (ВИПРАВЛЕННЯ CS0118/CS0246) ---
 try
 {
     Console.WriteLine("Starting EchoServer (TCP) and UdpTimedSender...");
     
+    // Кваліфікуємо типи, щоб уникнути конфлікту імен 'EchoServer'
     // Використовуємо using для автоматичного виклику Dispose
-    using var server = new EchoServer(50000); 
-    using var udpSender = new UdpTimedSender("127.0.0.1", 60000); 
+    using var server = new EchoServer.EchoServer(50000); 
+    using var udpSender = new EchoServer.UdpTimedSender("127.0.0.1", 60000); 
     
     udpSender.StartSending(100);
     
@@ -32,14 +33,13 @@ finally
 
 namespace EchoServer
 {
-    // Додано IDisposable для виправлення Sonar S2930
+    // Додано IDisposable та повний патерн Dispose (для Sonar S3881)
     public class EchoServer : IDisposable
     {
         private readonly int _port;
-        // Змінено на nullable
         private TcpListener? _listener; 
-        // Зроблено readonly для виправлення Sonar S2933
-        private readonly CancellationTokenSource _cancellationTokenSource; 
+        private readonly CancellationTokenSource _cancellationTokenSource; // readonly (для Sonar S2933)
+        private bool _disposed = false;
 
         //constuctor
         public EchoServer(int port)
@@ -81,6 +81,7 @@ namespace EchoServer
         }
 
         // РЕФАКТОРИНГ: Змінено на PUBLIC та приймає абстракцію Stream для тестування
+        // S2325: Залишаємо інстанс-методом, оскільки він керує життєвим циклом підключення.
         public async Task HandleClientAsync(Stream stream, CancellationToken token)
         {
             using (stream) 
@@ -115,11 +116,27 @@ namespace EchoServer
             Console.WriteLine("Client disconnected.");
         }
         
-        // РЕФАКТОРИНГ: Додано Dispose для IDisposable
+        // Реалізація повного патерну Dispose
         public void Dispose()
         {
-            Stop(); // Забезпечуємо зупинку
-            _cancellationTokenSource.Dispose();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                if (disposing)
+                {
+                    Stop(); 
+                    _cancellationTokenSource.Dispose();
+                    // _listener не є керованим ресурсом, що потребує Dispose,
+                    // його зупинка відбувається в Stop().
+                }
+
+                _disposed = true;
+            }
         }
     }
 
@@ -129,6 +146,10 @@ namespace EchoServer
         private readonly int _port;
         private readonly UdpClient _udpClient;
         private Timer? _timer; 
+        private bool _disposed = false;
+        
+        // РЕФАКТОРИНГ: Зроблено статичним для виправлення Sonar S2245 (небезпечне використання Random)
+        private static readonly Random Rnd = new Random(); 
 
         public UdpTimedSender(string host, int port)
         {
@@ -152,9 +173,13 @@ namespace EchoServer
             try
             {
                 //dummy data
-                Random rnd = new Random();
                 byte[] samples = new byte[1024];
-                rnd.NextBytes(samples);
+                
+                // Використовуємо статичний Random з блокуванням для потокобезпечності
+                lock (Rnd) 
+                {
+                    Rnd.NextBytes(samples);
+                }
                 i++;
 
                 // Змінено на явний масив для Concat
@@ -176,10 +201,25 @@ namespace EchoServer
             _timer = null;
         }
 
+        // Реалізація повного патерну Dispose
         public void Dispose()
         {
-            StopSending();
-            _udpClient.Dispose();
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                if (disposing)
+                {
+                    StopSending();
+                    _udpClient.Dispose();
+                    // _timer вже обробляється в StopSending()
+                }
+                _disposed = true;
+            }
         }
     }
 }
